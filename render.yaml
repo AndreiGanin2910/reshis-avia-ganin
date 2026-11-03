@@ -1,0 +1,24 @@
+services:
+  - type: web
+    name: reshis-avia-ganin
+    runtime: python
+    plan: free
+    region: frankfurt
+    buildCommand: pip install -r requirements.txt
+    startCommand: uvicorn app:app --host 0.0.0.0 --port $PORT
+    healthCheckPath: /healthz
+    envVars:
+      - key: PYTHON_VERSION
+        value: 3.12.11
+      - key: COOKIE_SECURE
+        value: "1"
+      - key: DATABASE_URL
+        fromDatabase:
+          name: reshis-avia-ganin-db
+          property: connectionString
+databases:
+  - name: reshis-avia-ganin-db
+    plan: free
+    region: frankfurt
+    databaseName: avia
+    user: avia
