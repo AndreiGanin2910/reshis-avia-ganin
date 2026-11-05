@@ -301,9 +301,48 @@ td:first-child {
     padding: 8px 4px;
 }
 
-#applyMedianPrice {
+#priceComparisonTitle ~ .actions button {
     max-width: 100%;
     white-space: normal;
+}
+
+@media (max-width: 620px) {
+    #priceComparison table,
+    #priceRows {
+        display: block;
+    }
+
+    #priceComparison thead {
+        position: absolute;
+        clip-path: inset(50%);
+        width: 1px;
+        height: 1px;
+        overflow: hidden;
+    }
+
+    #priceRows tr {
+        display: grid;
+        grid-template-columns: repeat(3, minmax(0, 1fr));
+        padding: 6px 0;
+        border-bottom: 1px solid var(--line);
+    }
+
+    #priceRows th {
+        grid-column: 1 / -1;
+    }
+
+    #priceRows td,
+    #priceRows th {
+        text-align: left;
+        border: 0;
+    }
+
+    #priceRows td::before {
+        content: attr(data-label);
+        display: block;
+        color: var(--muted);
+        font-size: 11px;
+    }
 }
 
 @media(max-width:760px) {
@@ -610,17 +649,30 @@ dialog::backdrop {
     <section aria-labelledby="priceComparisonTitle">
      <h2 id="priceComparisonTitle">Сравнить цены</h2>
      <div id="priceComparison" role="region" aria-label="Таблица сравнения цен" tabindex="0">
-     <table aria-label="Сравнение цен по медианному спросу">
+     <table role="table" aria-label="Сравнение цен по двум сценариям спроса">
       <thead>
-       <tr><th scope="col">Вариант</th><th scope="col">Цена, ₽</th><th scope="col">Продажи</th><th scope="col">Загрузка</th><th scope="col">Маржа, ₽</th></tr>
+       <tr><th scope="col">Вариант</th><th scope="col">Цена, ₽</th><th scope="col">Продажи по медиане</th><th scope="col">Загрузка по медиане</th><th scope="col">Маржа q0,1, ₽</th><th scope="col">Маржа q0,5, ₽</th></tr>
       </thead>
-      <tbody id="priceRows"></tbody>
+      <tbody id="priceRows" role="rowgroup"></tbody>
      </table>
      </div>
      <p class="note" id="priceDecision"></p>
+     <p class="note" id="riskTradeoff"></p>
      <p class="muted" id="priceScenarios"></p>
      <p class="muted" id="marginBasis"></p>
-     <button class="secondary" id="applyMedianPrice" type="button">Применить цену по медианному сценарию</button>
+     <div class="actions">
+      <button class="primary" id="applyMedianPrice" type="button">Применить цену по медиане</button>
+      <button class="secondary" id="applyWeakPrice" type="button">Применить цену для слабого спроса</button>
+     </div>
+     <div class="chart-header">
+      <h2>Маржа в зависимости от цены</h2>
+      <div class="legend">
+       <span><i class="dot amber"></i>Слабый спрос · q0,1</span>
+       <span><i class="dot"></i>Медианный спрос · q0,5</span>
+       <span><i class="dot" style="background:#62748a"></i>Базовый тариф</span>
+      </div>
+     </div>
+     <svg id="marginChart" role="img" aria-label="Кривые маржи для слабого и медианного спроса, отметки двух сценарных цен и базового тарифа"></svg>
     </section>
     <div class="chart-header">
      <h2>
@@ -876,19 +928,30 @@ function invalidate() {
 }
 
 function renderPriceComparison(comparison) {
-    const {base, entered, recommended} = comparison.prices;
+    const {base, entered, recommended, weak} = comparison.prices;
     const rows = $('priceRows');
     rows.replaceChildren();
     for (const [label, option] of [
-        ['Базовая', base], ['Введённая', entered], ['По медиане', recommended]
+        ['Базовая', base], ['Введённая', entered], ['По медиане', recommended], ['Для слабого спроса', weak]
     ]) {
         const row = rows.insertRow();
+        row.setAttribute('role', 'row');
         const name = document.createElement('th');
         name.scope = 'row';
+        name.setAttribute('role', 'rowheader');
         name.textContent = label;
         row.append(name);
-        for (const value of [fmt(option.price), fmt(option.sales), fmt(option.load_pct) + '%', fmt(Math.round(option.margin))]) {
-            row.insertCell().textContent = value;
+        for (const [heading, value] of [
+            ['Цена, ₽', fmt(option.price)],
+            ['Продажи по медиане', fmt(option.sales)],
+            ['Загрузка по медиане', fmt(option.load_pct) + '%'],
+            ['Маржа q0,1, ₽', fmt(Math.round(option.scenario_margins['0.1']))],
+            ['Маржа q0,5, ₽', fmt(Math.round(option.margin))]
+        ]) {
+            const cell = row.insertCell();
+            cell.setAttribute('role', 'cell');
+            cell.dataset.label = heading;
+            cell.textContent = value;
         }
     }
     const enteredGain = Math.round(recommended.margin - entered.margin);
@@ -897,6 +960,9 @@ function renderPriceComparison(comparison) {
     const action = enteredGain > 0 ? 'По медиане переход повышает маржу.' :
         enteredGain < 0 ? 'По медиане введённая цена даёт больше маржи.' : 'По медиане маржа практически одинакова.';
     $('priceDecision').textContent = `${action} Цена по медиане к введённой: ${delta(enteredGain)}, к базовой: ${delta(baseGain)}.`;
+    const weakGain = Math.round(weak.scenario_margins['0.1'] - recommended.scenario_margins['0.1']);
+    const medianGain = Math.round(weak.margin - recommended.margin);
+    $('riskTradeoff').textContent = `Если выбрать ${fmt(weak.price)} ₽ вместо ${fmt(recommended.price)} ₽, разница в марже при слабом спросе составит ${delta(weakGain)}, при медианном — ${delta(medianGain)}.`;
     const scenario = (level, label) => {
         const gain = Math.round(recommended.scenario_margins[level] - entered.scenario_margins[level]);
         return gain === 0 ? `${label} — маржа практически одинакова` :
@@ -904,9 +970,11 @@ function renderPriceComparison(comparison) {
     };
     $('priceScenarios').textContent = `Если спрос ниже или выше, выигрыш от смены цены может измениться. ${scenario('0.1', 'При низком спросе (0,1)')}. ${scenario('0.9', 'При высоком спросе (0,9)')}.`;
     $('marginBasis').textContent = `Маржа — продажи × (цена − ${fmt(comparison.cost_per_passenger)} ₽ затрат на пассажира). Постоянные расходы рейса не учтены.`;
-    const button = $('applyMedianPrice');
-    button.dataset.price = recommended.price;
-    button.disabled = recommended.price === entered.price;
+    for (const [id, option] of [['applyMedianPrice', recommended], ['applyWeakPrice', weak]]) {
+        const button = $(id);
+        button.dataset.price = option.price;
+        button.disabled = option.price === entered.price;
+    }
 }
 
 function updateRoute() {
@@ -930,6 +998,57 @@ function updateDestinations() {
 }
 let latestChartData = null;
 
+function svgDrawer(svg) {
+    return (tag, attributes, text) => {
+        const element = document.createElementNS('http://www.w3.org/2000/svg', tag);
+        for (const [key, value] of Object.entries(attributes)) element.setAttribute(key, value);
+        if (text !== undefined) element.textContent = text;
+        svg.append(element);
+        return element;
+    };
+}
+
+function marginChart(comparison) {
+    const svg = $('marginChart');
+    svg.replaceChildren();
+    const width = Math.max(280, Math.round(svg.clientWidth));
+    const left = 57, right = width - 31, top = 30, bottom = 180;
+    svg.setAttribute('viewBox', `0 0 ${width} 232`);
+    const add = svgDrawer(svg);
+    const curve = comparison.margin_curve;
+    const first = curve[0].price, last = curve.at(-1).price;
+    const values = curve.flatMap(point => [point.weak, point.median]);
+    const low = Math.min(0, ...values), high = Math.max(1, ...values);
+    const x = price => first === last ? (left + right) / 2 : left + (price - first) / (last - first) * (right - left);
+    const y = margin => bottom - (margin - low) / (high - low) * (bottom - top);
+    const label = (x, y, text, anchor = 'start') =>
+        add('text', {x, y, fill:'#62748a', 'font-size':11, 'text-anchor':anchor}, text);
+    label(left, 14, 'МАРЖА, МЛН ₽');
+    for (let i = 0; i <= 4; i++) {
+        const value = low + (high - low) * i / 4;
+        add('line', {x1:left, x2:right, y1:y(value), y2:y(value), stroke:'#e1e8f0'});
+        label(left - 7, y(value) + 4, fmt(Math.round(value / 10000) / 100), 'end');
+    }
+    const ticks = first === last ? [first] : [first, (first + last) / 2, last];
+    for (const price of ticks) label(x(price), 199, fmt(price), 'middle');
+    label((left + right) / 2, 222, 'ЦЕНА, ₽', 'middle');
+    const {base, weak, recommended} = comparison.prices;
+    if (base.price >= first && base.price <= last) {
+        add('line', {x1:x(base.price), x2:x(base.price), y1:top, y2:bottom, stroke:'#62748a', 'stroke-dasharray':'4 4'});
+    }
+    for (const [key, option, level, color] of [
+        ['weak', weak, '0.1', '#b96b00'], ['median', recommended, '0.5', '#2166eb']
+    ]) {
+        add('polyline', {points:curve.map(point => `${x(point.price)},${y(point[key])}`).join(' '),
+            stroke:color, 'stroke-width':2.5, fill:'none'});
+        const margin = option.scenario_margins[level];
+        const dot = add('circle', {cx:x(option.price), cy:y(margin), r:5, fill:color, stroke:'white', 'stroke-width':1.5});
+        const title = document.createElementNS('http://www.w3.org/2000/svg', 'title');
+        title.textContent = `q${level} · ${fmt(option.price)} ₽ · маржа ${fmt(Math.round(margin))} ₽`;
+        dot.append(title);
+    }
+}
+
 function chart(data) {
     latestChartData = data;
     const svg = $('chart');
@@ -943,15 +1062,7 @@ function chart(data) {
     svg.setAttribute('viewBox', `0 0 ${width} ${height}`);
     const namespace = 'http://www.w3.org/2000/svg';
 
-    function add(tag, attributes, text) {
-        const element = document.createElementNS(namespace, tag);
-        for (const [key, value] of Object.entries(attributes)) {
-            element.setAttribute(key, value);
-        }
-        if (text !== undefined) element.textContent = text;
-        svg.append(element);
-        return element;
-    }
+    const add = svgDrawer(svg);
 
     const values = data.quantiles.map(point => point.demand);
     const low = Math.min(0, ...values);
@@ -1037,6 +1148,7 @@ function chart(data) {
 const chartResizeObserver = new ResizeObserver(() => {
     if (latestChartData && !$('result').classList.contains('hidden')) {
         chart(latestChartData);
+        marginChart(latestChartData.comparison);
     }
 });
 chartResizeObserver.observe($('chart'));
@@ -1051,11 +1163,13 @@ $('resetPrice').addEventListener('click', () => {
     $('price').value = route.base_price;
     invalidate();
 });
-$('applyMedianPrice').addEventListener('click', () => {
-    if (!currentUser || predicting || $('result').classList.contains('hidden')) return;
-    $('price').value = $('applyMedianPrice').dataset.price;
-    $('form').requestSubmit();
-});
+for (const id of ['applyMedianPrice', 'applyWeakPrice']) {
+    $(id).addEventListener('click', event => {
+        if (!currentUser || predicting || $('result').classList.contains('hidden')) return;
+        $('price').value = event.currentTarget.dataset.price;
+        $('form').requestSubmit();
+    });
+}
 $('form').addEventListener('submit', async e => {
     e.preventDefault();
     const route = active();
@@ -1116,6 +1230,7 @@ $('form').addEventListener('submit', async e => {
         }
         $('empty').classList.add('hidden');
         $('result').classList.remove('hidden');
+        marginChart(data.comparison);
     } catch (err) {
         if (revision === sessionRevision) $('error').textContent = err.message;
     } finally {

@@ -81,6 +81,10 @@ class PredictionRequest(BaseModel):
     price: float = Field(ge=0, allow_inf_nan=False)
 
 
+def sales_at_demand(demand, seats):
+    return min(seats, max(0., demand))
+
+
 def calculate(flight, info, price):
     seats = int(flight['seats'])
     delta = float(info['price_sensitivity']) * (price - float(info['base_price']))
@@ -88,30 +92,38 @@ def calculate(flight, info, price):
     for q in QUANTILES:
         demand = float(flight[f'{q}_base_demand']) - delta
         scenarios.append({'quantile': float(q), 'demand': demand,
-                          'sales': min(seats, max(0., demand))})
+                          'sales': sales_at_demand(demand, seats)})
     median = scenarios[4]
     return {'seats': seats, 'demand': median['demand'], 'sales': median['sales'],
             'remaining_after_forecast': seats - median['sales'], 'quantiles': scenarios}
+
+
+def scenario_price(demand, seats, info):
+    slope = float(info.price_sensitivity)
+    base = float(info.base_price)
+    unconstrained = (info.cost_per_passenger + base + demand / slope) / 2
+    fills_plane = base + (demand - seats) / slope
+    return float(min(info.price_max, max(info.price_min, round(max(unconstrained, fills_plane), 2))))
 
 
 def compare_prices(flight, info, entered, price):
     base_price = float(info.base_price)
     cost = float(info.cost_per_passenger)
     seats = entered['seats']
-    saved_price = pd.to_numeric(flight.get('0.5_price'), errors='coerce')
-    if math.isfinite(saved_price) and info.price_min <= saved_price <= info.price_max:
-        recommended = float(saved_price)
-    else:
-        slope = float(info.price_sensitivity)
-        demand = float(flight['0.5_base_demand'])
-        unconstrained = (cost + base_price + demand / slope) / 2
-        fills_plane = base_price + (demand - seats) / slope
-        recommended = float(min(info.price_max, max(info.price_min, round(max(unconstrained, fills_plane), 2))))
+    def price_for(level):
+        saved = pd.to_numeric(flight.get(f'{level}_price'), errors='coerce')
+        if math.isfinite(saved) and info.price_min <= saved <= info.price_max:
+            return float(saved)
+        return scenario_price(float(flight[f'{level}_base_demand']), seats, info)
+
+    recommended = price_for('0.5')
+    weak = price_for('0.1')
 
     candidates = (
         ('base', base_price, calculate(flight, info, base_price)),
         ('entered', price, entered),
         ('recommended', recommended, calculate(flight, info, recommended)),
+        ('weak', weak, calculate(flight, info, weak)),
     )
     rows = {}
     for key, candidate_price, result in candidates:
@@ -122,10 +134,25 @@ def compare_prices(flight, info, entered, price):
             'margin': (candidate_price - cost) * result['sales'],
             'scenario_margins': {
                 str(result['quantiles'][index]['quantile']): (candidate_price - cost) * result['quantiles'][index]['sales']
-                for index in (0, 8)
+                for index in (0, 4, 8)
             },
         }
-    return {'cost_per_passenger': cost, 'prices': rows}
+    low, high = float(info.price_min), float(info.price_max)
+    slope = float(info.price_sensitivity)
+    demands = [float(flight[f'{level}_base_demand']) for level in ('0.1', '0.5')]
+    chart_prices = {low + (high - low) * i / 64 for i in range(65)}
+    chart_prices.update(p for p in (base_price, weak, recommended, high) if low <= p <= high)
+    for demand in demands:
+        for available in (0, seats):
+            boundary = base_price + (demand - available) / slope
+            if low <= boundary <= high:
+                chart_prices.add(boundary)
+    curve = [
+        {'price': p, 'weak': (p - cost) * sales_at_demand(demands[0] - slope * (p - base_price), seats),
+         'median': (p - cost) * sales_at_demand(demands[1] - slope * (p - base_price), seats)}
+        for p in sorted(chart_prices)
+    ]
+    return {'cost_per_passenger': cost, 'prices': rows, 'margin_curve': curve}
 
 
 @app.get('/')
