@@ -292,6 +292,20 @@ td:first-child {
     text-align: left
 }
 
+#priceComparison {
+    overflow-x: auto;
+}
+
+#priceComparison th,
+#priceComparison td {
+    padding: 8px 4px;
+}
+
+#applyMedianPrice {
+    max-width: 100%;
+    white-space: normal;
+}
+
 @media(max-width:760px) {
 
     header>div,
@@ -593,6 +607,21 @@ dialog::backdrop {
     </div>
     <p class="note" id="notice">
     </p>
+    <section aria-labelledby="priceComparisonTitle">
+     <h2 id="priceComparisonTitle">Сравнить цены</h2>
+     <div id="priceComparison" role="region" aria-label="Таблица сравнения цен" tabindex="0">
+     <table aria-label="Сравнение цен по медианному спросу">
+      <thead>
+       <tr><th scope="col">Вариант</th><th scope="col">Цена, ₽</th><th scope="col">Продажи</th><th scope="col">Загрузка</th><th scope="col">Маржа, ₽</th></tr>
+      </thead>
+      <tbody id="priceRows"></tbody>
+     </table>
+     </div>
+     <p class="note" id="priceDecision"></p>
+     <p class="muted" id="priceScenarios"></p>
+     <p class="muted" id="marginBasis"></p>
+     <button class="secondary" id="applyMedianPrice" type="button">Применить цену по медианному сценарию</button>
+    </section>
     <div class="chart-header">
      <h2>
       Какой спрос возможен
@@ -846,6 +875,40 @@ function invalidate() {
     $('error').textContent = '';
 }
 
+function renderPriceComparison(comparison) {
+    const {base, entered, recommended} = comparison.prices;
+    const rows = $('priceRows');
+    rows.replaceChildren();
+    for (const [label, option] of [
+        ['Базовая', base], ['Введённая', entered], ['По медиане', recommended]
+    ]) {
+        const row = rows.insertRow();
+        const name = document.createElement('th');
+        name.scope = 'row';
+        name.textContent = label;
+        row.append(name);
+        for (const value of [fmt(option.price), fmt(option.sales), fmt(option.load_pct) + '%', fmt(Math.round(option.margin))]) {
+            row.insertCell().textContent = value;
+        }
+    }
+    const enteredGain = Math.round(recommended.margin - entered.margin);
+    const baseGain = Math.round(recommended.margin - base.margin);
+    const delta = value => (value > 0 ? '+' : '') + fmt(value) + ' ₽';
+    const action = enteredGain > 0 ? 'По медиане переход повышает маржу.' :
+        enteredGain < 0 ? 'По медиане введённая цена даёт больше маржи.' : 'По медиане маржа практически одинакова.';
+    $('priceDecision').textContent = `${action} Цена по медиане к введённой: ${delta(enteredGain)}, к базовой: ${delta(baseGain)}.`;
+    const scenario = (level, label) => {
+        const gain = Math.round(recommended.scenario_margins[level] - entered.scenario_margins[level]);
+        return gain === 0 ? `${label} — маржа практически одинакова` :
+            `${label} — ${gain > 0 ? 'цена по медиане' : 'введённая цена'} даёт на ${fmt(Math.abs(gain))} ₽ больше`;
+    };
+    $('priceScenarios').textContent = `Если спрос ниже или выше, выигрыш от смены цены может измениться. ${scenario('0.1', 'При низком спросе (0,1)')}. ${scenario('0.9', 'При высоком спросе (0,9)')}.`;
+    $('marginBasis').textContent = `Маржа — продажи × (цена − ${fmt(comparison.cost_per_passenger)} ₽ затрат на пассажира). Постоянные расходы рейса не учтены.`;
+    const button = $('applyMedianPrice');
+    button.dataset.price = recommended.price;
+    button.disabled = recommended.price === entered.price;
+}
+
 function updateRoute() {
     const r = active();
     if (!r) {
@@ -988,6 +1051,11 @@ $('resetPrice').addEventListener('click', () => {
     $('price').value = route.base_price;
     invalidate();
 });
+$('applyMedianPrice').addEventListener('click', () => {
+    if (!currentUser || predicting || $('result').classList.contains('hidden')) return;
+    $('price').value = $('applyMedianPrice').dataset.price;
+    $('form').requestSubmit();
+});
 $('form').addEventListener('submit', async e => {
     e.preventDefault();
     const route = active();
@@ -1032,6 +1100,7 @@ $('form').addEventListener('submit', async e => {
             ]) $(id).textContent = fmt(data[key]);
         $('demandLabel').textContent = data.demand < 0 ? 'ЛИНЕЙНАЯ ОЦЕНКА СПРОСА (МЕДИАНА)' : 'МЕДИАННЫЙ СПРОС';
         $('notice').textContent = data.demand < 0 ? 'При отрицательной линейной оценке прогноз продаж равен нулю.' : data.demand > data.seats ? 'Медианный спрос превышает вместимость. Продажи ограничены числом мест.' : 'При медианном сценарии мест хватает всем желающим.';
+        renderPriceComparison(data.comparison);
         const upper = data.quantiles.at(-1).demand;
         $('chartSummary').textContent = `Линейная оценка спроса на уровне 0,9 — ${fmt(upper)} при ${fmt(data.seats)} местах. ${upper > data.seats ? 'В этом сценарии продажи ограничены вместимостью.' : 'Вместимости хватает для этого сценария.'}`;
         chart(data);

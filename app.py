@@ -42,7 +42,7 @@ def load_data():
     if not configured and not path.exists():
         path = DATA / 'seasonal_forecast.csv'
     forecast = pd.read_csv(path)
-    required_r = {'route', 'name', 'base_price', 'price_sensitivity', 'price_min', 'price_max'}
+    required_r = {'route', 'name', 'base_price', 'cost_per_passenger', 'price_sensitivity', 'price_min', 'price_max'}
     required_f = {'route', 'date', 'seats'} | {f'{q}_base_demand' for q in QUANTILES}
     if not required_r.issubset(routes.columns) or not required_f.issubset(forecast.columns):
         raise ValueError('В CSV отсутствуют обязательные столбцы.')
@@ -53,7 +53,7 @@ def load_data():
         raise ValueError('Повторяющиеся маршруты или пары маршрут-дата.')
     if not set(forecast['route']).issubset(set(routes['route'])):
         raise ValueError('Маршрут прогноза отсутствует в справочнике.')
-    for frame, columns in [(routes, ['base_price','price_sensitivity','price_min','price_max']),
+    for frame, columns in [(routes, ['base_price','cost_per_passenger','price_sensitivity','price_min','price_max']),
                            (forecast, ['seats'] + [f'{q}_base_demand' for q in QUANTILES])]:
         for column in columns:
             frame[column] = pd.to_numeric(frame[column], errors='raise')
@@ -63,6 +63,8 @@ def load_data():
         raise ValueError('Число мест должно быть положительным целым.')
     if (routes.price_sensitivity <= 0).any() or (routes.price_min < 0).any() or (routes.price_min > routes.price_max).any():
         raise ValueError('Некорректные параметры цены.')
+    if (routes.cost_per_passenger < 0).any():
+        raise ValueError('Затраты на пассажира должны быть неотрицательными.')
     values = forecast[[f'{q}_base_demand' for q in QUANTILES]].to_numpy()
     if (values[:, 1:] < values[:, :-1]).any():
         raise ValueError('Квантили пересекаются. Проверьте прогноз перед использованием.')
@@ -90,6 +92,40 @@ def calculate(flight, info, price):
     median = scenarios[4]
     return {'seats': seats, 'demand': median['demand'], 'sales': median['sales'],
             'remaining_after_forecast': seats - median['sales'], 'quantiles': scenarios}
+
+
+def compare_prices(flight, info, entered, price):
+    base_price = float(info.base_price)
+    cost = float(info.cost_per_passenger)
+    seats = entered['seats']
+    saved_price = pd.to_numeric(flight.get('0.5_price'), errors='coerce')
+    if math.isfinite(saved_price) and info.price_min <= saved_price <= info.price_max:
+        recommended = float(saved_price)
+    else:
+        slope = float(info.price_sensitivity)
+        demand = float(flight['0.5_base_demand'])
+        unconstrained = (cost + base_price + demand / slope) / 2
+        fills_plane = base_price + (demand - seats) / slope
+        recommended = float(min(info.price_max, max(info.price_min, round(max(unconstrained, fills_plane), 2))))
+
+    candidates = (
+        ('base', base_price, calculate(flight, info, base_price)),
+        ('entered', price, entered),
+        ('recommended', recommended, calculate(flight, info, recommended)),
+    )
+    rows = {}
+    for key, candidate_price, result in candidates:
+        rows[key] = {
+            'price': candidate_price,
+            'sales': result['sales'],
+            'load_pct': 100 * result['sales'] / seats,
+            'margin': (candidate_price - cost) * result['sales'],
+            'scenario_margins': {
+                str(result['quantiles'][index]['quantile']): (candidate_price - cost) * result['quantiles'][index]['sales']
+                for index in (0, 8)
+            },
+        }
+    return {'cost_per_passenger': cost, 'prices': rows}
 
 
 @app.get('/')
@@ -123,5 +159,7 @@ def predict(request: PredictionRequest, user=Depends(authorized_calculation)):
     low, high = float(info.price_min), float(info.price_max)
     if not low <= request.price <= high:
         raise HTTPException(422, f'Допустимая цена: {low:g}–{high:g} ₽.')
-    return {'route': route, 'date': day, 'price': request.price,
-            **calculate(FORECAST.loc[(route, day)], info, request.price)}
+    flight = FORECAST.loc[(route, day)]
+    result = calculate(flight, info, request.price)
+    return {'route': route, 'date': day, 'price': request.price, **result,
+            'comparison': compare_prices(flight, info, result, request.price)}
