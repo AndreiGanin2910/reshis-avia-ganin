@@ -377,10 +377,6 @@ td:first-child {
     margin: 0
 }
 
-.access-note button {
-    white-space: nowrap
-}
-
 dialog {
     border: 0;
     border-radius: 18px;
@@ -517,11 +513,8 @@ dialog::backdrop {
     <p>
      Войдите в аккаунт или зарегистрируйтесь, чтобы рассчитывать прогнозы.
     </p>
-    <button class="secondary" id="accessLogin" type="button">
-     Войти в аккаунт
-    </button>
    </section>
-   <section class="panel">
+   <section class="panel hidden" id="forecastPanel">
     <form id="form">
      <div class="grid">
       <label>
@@ -547,7 +540,7 @@ dialog::backdrop {
      <div class="actions">
       <span class="hint muted" id="priceHint">
       </span>
-      <button class="secondary" id="resetPrice" type="button">
+      <button class="secondary" disabled id="resetPrice" type="button">
        Базовая цена
       </button>
       <button class="primary" disabled="" id="submit" type="submit">
@@ -555,10 +548,9 @@ dialog::backdrop {
       </button>
      </div>
     </form>
-    <p class="error" id="error" role="alert">
-    </p>
    </section>
-   <section class="panel placeholder" id="empty">
+   <p class="error" id="error" role="alert"></p>
+   <section class="panel placeholder hidden" id="empty">
     <strong>
      У каждого рейса — свой спрос
     </strong>
@@ -578,7 +570,7 @@ dialog::backdrop {
       </strong>
      </div>
      <div class="card">
-      <span>
+      <span id="demandLabel">
        МЕДИАННЫЙ СПРОС
       </span>
       <strong class="value" id="demand">
@@ -625,6 +617,7 @@ dialog::backdrop {
     </div>
     <svg aria-label="Квантильная кривая спроса" id="chart" role="img" viewbox="0 0 1000 360">
     </svg>
+    <p class="muted" id="chartSummary"></p>
     <p class="muted">
      Линия показывает возможный спрос при этой цене. Точка медианы — центральная оценка. Красная линия — вместимость.
     </p>
@@ -731,6 +724,8 @@ dialog::backdrop {
 let routes = [],
     currentUser = null,
     csrfToken = '',
+    sessionRevision = 0,
+    predicting = false,
     authMode = 'login';
 
 function updateAccess() {
@@ -738,10 +733,14 @@ function updateAccess() {
     $('accountName').textContent = signedIn ? currentUser.display_name : '';
     for (const id of ['accountName', 'logout']) $(id).classList.toggle('hidden', !signedIn);
     for (const id of ['loginOpen', 'registerOpen', 'accessNote']) $(id).classList.toggle('hidden', signedIn);
-    $('submit').disabled = !signedIn || !routes.length;
+    $('forecastPanel').classList.toggle('hidden', !signedIn);
+    const unavailable = !signedIn || !active() || predicting || $('logout').disabled;
+    $('submit').disabled = unavailable;
+    $('resetPrice').disabled = unavailable;
 }
 
 function setSession(data) {
+    sessionRevision += 1;
     currentUser = data?.user ?? null;
     csrfToken = data?.csrf_token ?? '';
     invalidate();
@@ -787,7 +786,6 @@ function openAuth(mode) {
     $('authDialog').showModal();
 }
 $('loginOpen').addEventListener('click', () => openAuth('login'));
-$('accessLogin').addEventListener('click', () => openAuth('login'));
 $('registerOpen').addEventListener('click', () => openAuth('register'));
 $('loginTab').addEventListener('click', () => authModeSelect('login'));
 $('registerTab').addEventListener('click', () => authModeSelect('register'));
@@ -819,6 +817,9 @@ $('authForm').addEventListener('submit', async e => {
 });
 $('logout').addEventListener('click', async () => {
     $('logout').disabled = true;
+    sessionRevision += 1;
+    invalidate();
+    updateAccess();
     try {
         await api('/api/auth/logout', {});
         setSession(null);
@@ -826,6 +827,7 @@ $('logout').addEventListener('click', async () => {
         $('error').textContent = error.message;
     } finally {
         $('logout').disabled = false;
+        updateAccess();
     }
 });
 
@@ -840,18 +842,23 @@ function active() {
 
 function invalidate() {
     $('result').classList.add('hidden');
-    $('empty').classList.remove('hidden');
+    $('empty').classList.toggle('hidden', !currentUser);
     $('error').textContent = '';
 }
 
 function updateRoute() {
     const r = active();
+    if (!r) {
+        updateAccess();
+        return;
+    }
     fill($('date'), r.dates.map(d => [d, new Date(d + 'T12:00:00').toLocaleDateString('ru-RU')]));
     $('price').value = r.base_price;
     $('price').min = r.price_min;
     $('price').max = r.price_max;
     $('priceHint').textContent = `Диапазон ${fmt(r.price_min)}–${fmt(r.price_max)} ₽ · базовая ${fmt(r.base_price)} ₽`;
     invalidate();
+    updateAccess();
 }
 
 function updateDestinations() {
@@ -976,16 +983,18 @@ $('destination').addEventListener('change', updateRoute);
 $('date').addEventListener('change', invalidate);
 $('price').addEventListener('input', invalidate);
 $('resetPrice').addEventListener('click', () => {
-    $('price').value = active().base_price;
+    const route = active();
+    if (!route) return;
+    $('price').value = route.base_price;
     invalidate();
 });
 $('form').addEventListener('submit', async e => {
     e.preventDefault();
-    if (!currentUser) {
-        openAuth('login');
-        return;
-    }
+    const route = active();
+    if (!currentUser || !route || predicting || $('logout').disabled) return;
+    const revision = sessionRevision;
     invalidate();
+    predicting = true;
     const controls = [...$('form').elements];
     controls.forEach(c => c.disabled = true);
     $('submit').textContent = 'Рассчитываем…';
@@ -1007,16 +1016,24 @@ $('form').addEventListener('submit', async e => {
             body: JSON.stringify(payload)
         });
         const data = await response.json();
-        if (response.status === 401) setSession(null);
+        if (revision !== sessionRevision) return;
+        if (response.status === 401) {
+            setSession(null);
+            $('error').textContent = typeof data.detail === 'string' ? data.detail : 'Войдите в аккаунт снова.';
+            return;
+        }
         if (!response.ok) throw new Error(typeof data.detail === 'string' ? data.detail : 'Проверьте введённые данные.');
-        $('resultTitle').textContent = `${active().name} · ${new Date(data.date+'T12:00:00').toLocaleDateString('ru-RU')} · ${fmt(data.price)} ₽`;
+        $('resultTitle').textContent = `${route.name} · ${new Date(data.date+'T12:00:00').toLocaleDateString('ru-RU')} · ${fmt(data.price)} ₽`;
         for (const [id, key] of [
                 ['seats', 'seats'],
                 ['demand', 'demand'],
                 ['sales', 'sales'],
                 ['remaining', 'remaining_after_forecast']
             ]) $(id).textContent = fmt(data[key]);
-        $('notice').textContent = data.demand < 0 ? 'Линейная формула даёт отрицательный спрос. Экономически это означает нулевые продажи.' : data.demand > data.seats ? 'Медианный спрос превышает вместимость. Продажи ограничены числом мест.' : 'При медианном сценарии мест хватает всем желающим.';
+        $('demandLabel').textContent = data.demand < 0 ? 'ЛИНЕЙНАЯ ОЦЕНКА СПРОСА (МЕДИАНА)' : 'МЕДИАННЫЙ СПРОС';
+        $('notice').textContent = data.demand < 0 ? 'При отрицательной линейной оценке прогноз продаж равен нулю.' : data.demand > data.seats ? 'Медианный спрос превышает вместимость. Продажи ограничены числом мест.' : 'При медианном сценарии мест хватает всем желающим.';
+        const upper = data.quantiles.at(-1).demand;
+        $('chartSummary').textContent = `Линейная оценка спроса на уровне 0,9 — ${fmt(upper)} при ${fmt(data.seats)} местах. ${upper > data.seats ? 'В этом сценарии продажи ограничены вместимостью.' : 'Вместимости хватает для этого сценария.'}`;
         chart(data);
         $('scenarioRows').replaceChildren();
         for (const q of data.quantiles) {
@@ -1031,8 +1048,9 @@ $('form').addEventListener('submit', async e => {
         $('empty').classList.add('hidden');
         $('result').classList.remove('hidden');
     } catch (err) {
-        $('error').textContent = err.message;
+        if (revision === sessionRevision) $('error').textContent = err.message;
     } finally {
+        predicting = false;
         controls.forEach(c => c.disabled = false);
         $('submit').textContent = 'Рассчитать прогноз →';
         $('result').setAttribute('aria-busy', 'false');
@@ -1040,6 +1058,7 @@ $('form').addEventListener('submit', async e => {
     }
 });
 (async () => {
+    const revision = sessionRevision;
     try {
         const response = await fetch('/api/options');
         if (!response.ok) throw new Error('Не удалось загрузить справочник.');
@@ -1050,9 +1069,10 @@ $('form').addEventListener('submit', async e => {
         updateDestinations();
         $('source').textContent = data.demo ? 'Демонстрационный прогноз авторов задания · seasonal_forecast.csv' : 'Источник: ' + data.forecast_source;
         try {
-            setSession(await api('/api/auth/me'));
+            const session = await api('/api/auth/me');
+            if (revision === sessionRevision) setSession(session);
         } catch {
-            setSession(null);
+            if (revision === sessionRevision) setSession(null);
         }
         updateAccess();
     } catch (err) {

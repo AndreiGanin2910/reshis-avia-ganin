@@ -23,6 +23,7 @@ COOKIE = 'avia_session'
 SESSION_SECONDS = 7 * 24 * 60 * 60
 COOKIE_SECURE = os.getenv('COOKIE_SECURE', '0').lower() in {'1', 'true', 'yes'}
 USERNAME = re.compile(r'[A-Za-zА-Яа-яЁё0-9_.-]{3,32}\Z')
+CSRF_TOKEN = re.compile(r'[0-9a-f]{64}')
 
 
 class Credentials(BaseModel):
@@ -229,7 +230,7 @@ def authorized_calculation(request: Request, user=Depends(require_user)):
     same_origin(request)
     token = request.cookies.get(COOKIE, '')
     supplied = request.headers.get('x-csrf-token', '')
-    if not hmac.compare_digest(supplied, csrf_token(token)):
+    if not CSRF_TOKEN.fullmatch(supplied) or not hmac.compare_digest(supplied, csrf_token(token)):
         raise HTTPException(403, 'Обновите страницу и повторите запрос.')
     return user
 
